@@ -161,4 +161,13 @@ set(COMPONENT_SRCS
 )
 endif()
 
+if (CONFIG_ECHO_PYRAMID_BOARD)
+    message(STATUS "Current board name is " CONFIG_ECHO_PYRAMID_BOARD)
+    list(APPEND COMPONENT_ADD_INCLUDEDIRS ./echo_pyramid)
+    set(COMPONENT_SRCS
+        ./echo_pyramid/board.c
+        ./echo_pyramid/board_pins_config.c
+    )
+endif()
+
 register_component()
