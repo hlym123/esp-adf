@@ -354,10 +354,10 @@ private:
                     // 统一计算总能量（不分频段）
                     float total_energy = (bass + mid + treble) / 3.0f;
                     // 同时使用音量作为补充，提高响应灵敏度
-                    float volume_energy = fminf(volume * 7.0f, 1.0f);  // 进一步提高音量放大倍数
+                    float volume_energy = fminf(volume * 4.9f, 1.0f);  // 音量放大倍数调整为70%
                     // 综合能量，提高放大倍数让跳动更明显
-                    float combined_energy = (total_energy * 0.65f + volume_energy * 0.35f);  // 增加音量权重
-                    float energy = fminf(combined_energy * 8.0f, 1.0f);  // 提高放大倍数到8.0，让跳动更明显
+                    float combined_energy = (total_energy * 0.65f + volume_energy * 0.15f);  // 增加音量权重
+                    float energy = fminf(combined_energy * 4.9f, 1.0f);  // 能量放大倍数调整为70%
                     
                     // 渐变颜色：蓝色(低) → 绿色(中) → 红色(高)
                     // HSV色相：蓝色=240°, 绿色=120°, 红色=0°
@@ -392,9 +392,9 @@ private:
                     
                     // 统一计算总能量（与MUSIC_REACTIVE相同的优化）
                     float total_energy = (bass + mid + treble) / 3.0f;
-                    float volume_energy = fminf(volume * 7.0f, 1.0f);
+                    float volume_energy = fminf(volume * 4.9f, 1.0f);  // 音量放大倍数调整为70%
                     float combined_energy = (total_energy * 0.65f + volume_energy * 0.35f);
-                    float energy = fminf(combined_energy * 8.0f, 1.0f);
+                    float energy = fminf(combined_energy * 5.6f, 1.0f);  // 能量放大倍数调整为70%
                     
                     // 固定红色
                     float hue = 0.0f / 360.0f;  // 红色
@@ -416,9 +416,9 @@ private:
                     
                     // 统一计算总能量（与MUSIC_REACTIVE相同的优化）
                     float total_energy = (bass + mid + treble) / 3.0f;
-                    float volume_energy = fminf(volume * 7.0f, 1.0f);
+                    float volume_energy = fminf(volume * 4.9f, 1.0f);  // 音量放大倍数调整为70%
                     float combined_energy = (total_energy * 0.65f + volume_energy * 0.35f);
-                    float energy = fminf(combined_energy * 8.0f, 1.0f);
+                    float energy = fminf(combined_energy * 5.6f, 1.0f);  // 能量放大倍数调整为70%
                     
                     // 固定绿色
                     float hue = 120.0f / 360.0f;  // 绿色
@@ -438,11 +438,11 @@ private:
                     float mid = audio_mid_.load();
                     float treble = audio_treble_.load();
                     
-                    // 统一计算总能量（与MUSIC_REACTIVE相同的优化）
+                    // 统一计算总能量
                     float total_energy = (bass + mid + treble) / 3.0f;
-                    float volume_energy = fminf(volume * 7.0f, 1.0f);
+                    float volume_energy = fminf(volume * 4.9f, 1.0f);  // 音量放大倍数调整为70%
                     float combined_energy = (total_energy * 0.65f + volume_energy * 0.35f);
-                    float energy = fminf(combined_energy * 8.0f, 1.0f);
+                    float energy = fminf(combined_energy * 5.6f, 1.0f);  // 能量放大倍数调整为70%
                     
                     // 固定蓝色
                     float hue = 240.0f / 360.0f;  // 蓝色

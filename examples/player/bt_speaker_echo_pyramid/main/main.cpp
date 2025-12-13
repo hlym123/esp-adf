@@ -27,7 +27,8 @@
 #include "a2dp_stream.h"
 #include "i2c_bus.h"
 #include "bsp/echo_pyramid.h"
-#include "audio_analyzer.h"
+#include "bsp/led_matrix.h"
+#include "app/audio_analyzer.h"
 
 static const char *TAG = "main";
 
@@ -35,6 +36,7 @@ static esp_periph_handle_t bt_periph = NULL;
 static EchoPyramid* echo_pyramid = nullptr;
 static Si5351* si5351 = nullptr;
 static Aw87559* aw87559 = nullptr;
+static void* led_matrix_handle = nullptr;  // 5x5 LED矩阵句柄
 
 #define CONFIG_ESP_LYRATD_MSC_V2_1_BOARD 1 
 
@@ -49,21 +51,37 @@ static void touch_event_callback(TouchEvent event) {
             // 左侧向上滑动：下一首
             ESP_LOGI(TAG, "[Touch] Left slide up: Next track");
             periph_bt_avrc_next(bt_periph);
+            // 显示右箭头
+            if (led_matrix_handle != nullptr) {
+                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_RIGHT_ARROW);
+            }
             break;
         case TouchEvent::LEFT_SLIDE_DOWN:
             // 左侧向下滑动：上一首
             ESP_LOGI(TAG, "[Touch] Left slide down: Previous track");
             periph_bt_avrc_prev(bt_periph);
+            // 显示左箭头
+            if (led_matrix_handle != nullptr) {
+                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_LEFT_ARROW);
+            }
             break;
         case TouchEvent::RIGHT_SLIDE_UP:
             // 右侧向上滑动：音量减小
             ESP_LOGI(TAG, "[Touch] Right slide up: Volume down");
             periph_bt_volume_down(bt_periph);
+            // 显示下箭头
+            if (led_matrix_handle != nullptr) {
+                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_DOWN_ARROW);
+            }
             break;
         case TouchEvent::RIGHT_SLIDE_DOWN:
             // 右侧向下滑动：音量增大
             ESP_LOGI(TAG, "[Touch] Right slide down: Volume up");
             periph_bt_volume_up(bt_periph);
+            // 显示上箭头
+            if (led_matrix_handle != nullptr) {
+                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_UP_ARROW);
+            }
             break;
     }
 }
@@ -86,8 +104,14 @@ static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_ser
                     LightMode current_mode = echo_pyramid->getLightMode();
                     LightMode new_mode = GetNextLightMode(current_mode);
                     echo_pyramid->setLightMode(new_mode);
-                    const char* mode_names[] = {"OFF", "STATIC", "BREATHE", "RAINBOW", "CHASE", 
-                                                "MUSIC_REACTIVE", "MUSIC_REACTIVE_RED", "MUSIC_REACTIVE_GREEN", "MUSIC_REACTIVE_BLUE"};
+                    
+                    // 在5x5 LED矩阵上显示水滴效果（中间向四周发散）
+                    if (led_matrix_handle != nullptr) {
+                        led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_RIPPLE);
+                    }
+                    
+                    const char* mode_names[] = {"OFF", "MUSIC_REACTIVE", "MUSIC_REACTIVE_RED", "MUSIC_REACTIVE_GREEN", "MUSIC_REACTIVE_BLUE",
+                                                "RAINBOW", "BREATHE", "CHASE", "STATIC"};
                     int mode_index = static_cast<int>(new_mode);
                     if (mode_index >= 0 && mode_index < 9) {
                         ESP_LOGI(TAG, "[ * ] [Button] Switch light mode to: %s", mode_names[mode_index]);
@@ -104,10 +128,18 @@ static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_ser
             case INPUT_KEY_USER_ID_VOLUP:
                 ESP_LOGI(TAG, "[ * ] [long Vol+] Vol+");
                 periph_bt_volume_up(bt_periph);
+                // 显示上箭头
+                if (led_matrix_handle != nullptr) {
+                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_UP_ARROW);
+                }
                 break;
             case INPUT_KEY_USER_ID_VOLDOWN:
                 ESP_LOGI(TAG, "[ * ] [long Vol-] Vol-");
                 periph_bt_volume_down(bt_periph);
+                // 显示下箭头
+                if (led_matrix_handle != nullptr) {
+                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_DOWN_ARROW);
+                }
                 break;
 #endif
         }
@@ -117,10 +149,18 @@ static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_ser
             case INPUT_KEY_USER_ID_VOLUP:
                 ESP_LOGI(TAG, "[ * ] [long Vol+] next");
                 periph_bt_avrc_next(bt_periph);
+                // 显示右箭头
+                if (led_matrix_handle != nullptr) {
+                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_RIGHT_ARROW);
+                }
                 break;
             case INPUT_KEY_USER_ID_VOLDOWN:
                 ESP_LOGI(TAG, "[ * ] [long Vol-] Previous");
                 periph_bt_avrc_prev(bt_periph);
+                // 显示左箭头
+                if (led_matrix_handle != nullptr) {
+                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_LEFT_ARROW);
+                }
                 break;
         }
 
@@ -131,7 +171,7 @@ static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_ser
 extern "C" void app_main(void)
 {
     audio_pipeline_handle_t pipeline;
-    audio_element_handle_t bt_stream_reader, i2s_stream_writer;
+    audio_element_handle_t bt_stream_reader, i2s_stream_writer, audio_analyzer_el;
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
@@ -167,6 +207,12 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "[ 2.2 ] Init Echo Pyramid");
     echo_pyramid = new EchoPyramid(i2c_bus, ECHO_PYRAMID_DEVICE_ADDR);
     
+    ESP_LOGI(TAG, "[ 2.2.1 ] Init 5x5 LED Matrix (GPIO 27)");
+    led_matrix_handle = led_matrix_init(27);
+    if (led_matrix_handle == nullptr) {
+        ESP_LOGW(TAG, "Failed to initialize LED matrix");
+    }
+    
     ESP_LOGI(TAG, "[ 2.3 ] Init Si5351");
     si5351 = new Si5351(i2c_bus); // before init codec chip    
     aw87559 = new Aw87559(i2c_bus);
@@ -198,18 +244,22 @@ extern "C" void app_main(void)
     };
     bt_stream_reader = a2dp_stream_init(&a2dp_config);
 
-    ESP_LOGI(TAG, "[4.2] Register all elements to audio pipeline");
-    audio_pipeline_register(pipeline, bt_stream_reader, "bt");
-    audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
-
-    ESP_LOGI(TAG, "[4.2.1] Create audio analyzer for music reactive lighting");
+    ESP_LOGI(TAG, "[4.1.1] Create audio analyzer for music reactive lighting");
     audio_analyzer_cfg_t analyzer_cfg = {
         .echo_pyramid = echo_pyramid,
     };
-    audio_element_handle_t audio_analyzer = audio_analyzer_init(&analyzer_cfg);
-    audio_pipeline_register(pipeline, audio_analyzer, "analyzer");
+    audio_analyzer_el = audio_analyzer_init(&analyzer_cfg);
+    if (audio_analyzer_el == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize audio analyzer");
+        return;
+    }
 
-    ESP_LOGI(TAG, "[4.3] Link it together [Bluetooth]-->bt_stream_reader-->[filter]-->[analyzer]-->i2s_stream_writer-->[codec_chip]");
+    ESP_LOGI(TAG, "[4.2] Register all elements to audio pipeline");
+    audio_pipeline_register(pipeline, bt_stream_reader, "bt");
+    audio_pipeline_register(pipeline, audio_analyzer_el, "analyzer");
+    audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
+
+    ESP_LOGI(TAG, "[4.3] Link it together [Bluetooth]-->bt_stream_reader-->[analyzer]-->[filter]-->i2s_stream_writer-->[codec_chip]");
 #if (CONFIG_ESP_LYRATD_MSC_V2_1_BOARD || CONFIG_ESP_LYRATD_MSC_V2_2_BOARD)
     rsp_filter_cfg_t rsp_cfg = DEFAULT_RESAMPLE_FILTER_CONFIG();
     rsp_cfg.src_rate = 44100;
@@ -220,7 +270,7 @@ extern "C" void app_main(void)
     audio_element_handle_t filter = rsp_filter_init(&rsp_cfg);
     audio_pipeline_register(pipeline, filter, "filter");
     i2s_stream_set_clk(i2s_stream_writer, 48000, 16, 2);
-    const char *link_tag[4] = {"bt", "filter", "analyzer", "i2s"};
+    const char *link_tag[4] = {"bt", "analyzer", "filter", "i2s"};
     audio_pipeline_link(pipeline, &link_tag[0], 4);
 #else
     const char *link_tag[3] = {"bt", "analyzer", "i2s"};
@@ -312,20 +362,27 @@ extern "C" void app_main(void)
 
     /* Release all resources */
     audio_pipeline_unregister(pipeline, bt_stream_reader);
+    audio_pipeline_unregister(pipeline, audio_analyzer_el);
     audio_pipeline_unregister(pipeline, i2s_stream_writer);
-    audio_pipeline_unregister(pipeline, audio_analyzer);
-    audio_element_deinit(audio_analyzer);
 #if (CONFIG_ESP_LYRATD_MSC_V2_1_BOARD || CONFIG_ESP_LYRATD_MSC_V2_2_BOARD)
     audio_pipeline_unregister(pipeline, filter);
     audio_element_deinit(filter);
 #endif
     audio_pipeline_deinit(pipeline);
     audio_element_deinit(bt_stream_reader);
+    audio_element_deinit(audio_analyzer_el);
     audio_element_deinit(i2s_stream_writer);
 #if (INPUT_KEY_NUM > 0)
     periph_service_destroy(input_ser);
 #endif
     esp_periph_set_destroy(set);
+    
+    // 清理5x5 LED矩阵
+    if (led_matrix_handle != nullptr) {
+        led_matrix_deinit(led_matrix_handle);
+        led_matrix_handle = nullptr;
+    }
+    
     esp_bluedroid_disable();
     esp_bluedroid_deinit();
     esp_bt_controller_disable();

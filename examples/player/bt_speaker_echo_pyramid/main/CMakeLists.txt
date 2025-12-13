@@ -1,10 +1,12 @@
 set(src_dirs        
     .
+    app
     bsp
 )
 
 set(include_dirs  
     .
+    app
     bsp
 )
 
