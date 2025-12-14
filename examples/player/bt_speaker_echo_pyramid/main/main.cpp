@@ -236,6 +236,7 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Failed to create app input handle task");
         return;
     }
+    led_matrix_show_ripple_effect();
 
     ESP_LOGI(TAG, "[ 2.5 ] Setup touch callbacks");
     echo_pyramid->addTouchEventCallback(touch_event_cb);

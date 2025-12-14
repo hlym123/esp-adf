@@ -426,9 +426,6 @@ void led_matrix_init(int gpio_num)
     g_led_matrix = m;
 
     led_strip_clear(m->strip);
-    for (int i = 0; i < MATRIX_TOTAL_PIXELS; i++) {
-        led_strip_set_pixel(m->strip, i, 0, 0, 0);
-    }
     led_strip_refresh(m->strip);
 
     xTaskCreate(led_matrix_task, "led_matrix", 8192, m, 4, &m->task);
