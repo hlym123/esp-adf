@@ -314,7 +314,7 @@ private:
                     setAllRgbColor(color);
                     breathe_step++;
                     if (breathe_step > 1000) breathe_step = 0;
-                    vTaskDelay(pdMS_TO_TICKS(60));
+                    vTaskDelay(pdMS_TO_TICKS(30));
                     break;
                 }
 
@@ -595,6 +595,13 @@ LightMode EchoPyramid::getLightMode() const {
     return LightMode::OFF;
 }
 
+void EchoPyramid::setLightModeNext() {
+    LightMode current_mode = getLightMode();
+    int mode = static_cast<int>(current_mode);
+    int next_mode = (mode + 1) % 9; // 9种模式循环: OFF, MUSIC_REACTIVE, MUSIC_REACTIVE_RED, MUSIC_REACTIVE_GREEN, MUSIC_REACTIVE_BLUE, RAINBOW, BREATHE, CHASE, STATIC
+    setLightMode(static_cast<LightMode>(next_mode));
+}
+
 void EchoPyramid::setLightColor(uint32_t color) {
     if (stm32_) {
         stm32_->setEffectColor(color);
@@ -642,45 +649,36 @@ bool EchoPyramid::isTouchCallbacksPaused() const {
 
 void EchoPyramid::TouchTask(void* arg) {
     EchoPyramid* pyramid = static_cast<EchoPyramid*>(arg);
-    
+    uint32_t current_time;
+    bool touch_states[4];
+    int i;
     while (true) {
-        if (pyramid->stm32_ == nullptr) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
-        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        current_time = pdMS_TO_TICKS(xTaskGetTickCount());
 
         // 读取所有触摸状态
-        bool touch_states[4] = {
-            pyramid->stm32_->readTouchStatus(1),
-            pyramid->stm32_->readTouchStatus(2),
-            pyramid->stm32_->readTouchStatus(3),
-            pyramid->stm32_->readTouchStatus(4)
-        };
+        for (i = 0; i < 4; i++) {   
+            touch_states[i] = pyramid->stm32_->readTouchStatus(i + 1);
+            ESP_LOGD(TAG, "Touch state %d: %d", i + 1, touch_states[i]);
+        }
 
         // 在检测到触摸状态变化时打印触摸状态
         if (touch_states[0] != pyramid->touch_last_state_[0] ||
             touch_states[1] != pyramid->touch_last_state_[1] ||
             touch_states[2] != pyramid->touch_last_state_[2] ||
             touch_states[3] != pyramid->touch_last_state_[3]) {
-            ESP_LOGI(TAG, "Touch states: %d, %d, %d, %d", 
-                     touch_states[0], touch_states[1], touch_states[2], touch_states[3]);
-        }
+            ESP_LOGI(TAG, "Touch states: %d, %d, %d, %d", touch_states[0], touch_states[1], touch_states[2], touch_states[3]);
 
-        // 处理Touch1/2的滑动检测
-        pyramid->ProcessSwipe(touch_states[0], touch_states[1],
-                             pyramid->touch_last_state_[0], pyramid->touch_last_state_[1],
-                             0, 1, 2, current_time);
+            // 处理Touch1/2的滑动检测
+            pyramid->ProcessSwipe(touch_states[0], touch_states[1],
+                pyramid->touch_last_state_[0], pyramid->touch_last_state_[1], 0, 1, 2, current_time);
 
-        // 处理Touch3/4的滑动检测
-        pyramid->ProcessSwipe(touch_states[2], touch_states[3],
-                             pyramid->touch_last_state_[2], pyramid->touch_last_state_[3],
-                             1, 3, 4, current_time);
+            // 处理Touch3/4的滑动检测
+            pyramid->ProcessSwipe(touch_states[2], touch_states[3],
+                pyramid->touch_last_state_[2], pyramid->touch_last_state_[3], 1, 3, 4, current_time);
 
-        // 更新状态
-        for (int i = 0; i < 4; i++) {
-            pyramid->touch_last_state_[i] = touch_states[i];
+            for (i = 0; i < 4; i++) {
+                pyramid->touch_last_state_[i] = touch_states[i];
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -707,12 +705,12 @@ void EchoPyramid::ProcessSwipe(bool touch1, bool touch2, uint8_t& last_state1, u
             if (current_time - touch_swipe_time_[swipe_index] <= TOUCH_SWIPE_TIMEOUT_MS) {
                 if (touch_swipe_first_[swipe_index] == touch_num1 && touch2 && !last_state2) {
                     // touch_num1 → touch_num2 滑动
-                    TouchEvent event = (swipe_index == 0) ? TouchEvent::LEFT_SLIDE_UP : TouchEvent::RIGHT_SLIDE_UP;
+                    TouchEvent event = (swipe_index == 0) ? TouchEvent::LEFT_SLIDE_UP : TouchEvent::RIGHT_SLIDE_DOWN;
                     NotifyTouchEvent(event);
                     touch_swipe_first_[swipe_index] = 0;
                 } else if (touch_swipe_first_[swipe_index] == touch_num2 && touch1 && !last_state1) {
                     // touch_num2 → touch_num1 滑动
-                    TouchEvent event = (swipe_index == 0) ? TouchEvent::LEFT_SLIDE_DOWN : TouchEvent::RIGHT_SLIDE_DOWN;
+                    TouchEvent event = (swipe_index == 0) ? TouchEvent::LEFT_SLIDE_DOWN : TouchEvent::RIGHT_SLIDE_UP;
                     NotifyTouchEvent(event);
                     touch_swipe_first_[swipe_index] = 0;
                 }

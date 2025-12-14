@@ -29,6 +29,9 @@
 #include "bsp/echo_pyramid.h"
 #include "bsp/led_matrix.h"
 #include "app/audio_analyzer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "main";
 
@@ -36,137 +39,143 @@ static esp_periph_handle_t bt_periph = NULL;
 static EchoPyramid* echo_pyramid = nullptr;
 static Si5351* si5351 = nullptr;
 static Aw87559* aw87559 = nullptr;
-static void* led_matrix_handle = nullptr;  // 5x5 LED矩阵句柄
+static int current_volume = 50; 
 
-#define CONFIG_ESP_LYRATD_MSC_V2_1_BOARD 1 
+#define CONFIG_ESP_LYRATD_MSC_V2_1_BOARD 1
+
+// 事件类型
+typedef enum {
+    EVENT_TYPE_TOUCH,
+    EVENT_TYPE_KEY_CLICK_RELEASE,
+} event_type_t;
+
+// 事件数据结构
+typedef struct {
+    event_type_t type;
+    union {
+        TouchEvent touch_event;
+        struct {
+            int key_id;
+        } key_event;
+    } data;
+} input_event_t;
+
+static QueueHandle_t input_event_queue = NULL;
+static TaskHandle_t app_input_handle_task_handle = NULL; 
 
 
-static void touch_event_callback(TouchEvent event) {
-    if (bt_periph == NULL) {
+static esp_err_t key_event_cb(periph_service_handle_t handle, periph_service_event_t *evt, void *ctx)
+{
+    if (input_event_queue == NULL) {
+        return ESP_OK;
+    }
+
+    if (evt->type == INPUT_KEY_SERVICE_ACTION_CLICK_RELEASE && (int)evt->data == INPUT_KEY_USER_ID_PLAY) {
+        input_event_t event = {
+            .type = EVENT_TYPE_KEY_CLICK_RELEASE,
+            .data = { .key_event = { .key_id = INPUT_KEY_USER_ID_PLAY } }
+        };
+
+        if (xQueueSend(input_event_queue, &event, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "[Key] Event queue full, dropping key event");
+        }
+    }
+
+    return ESP_OK;
+}
+
+static void touch_event_cb(TouchEvent event) 
+{
+    if (input_event_queue == NULL) {
         return;
     }
 
-    switch (event) {
-        case TouchEvent::LEFT_SLIDE_UP:
-            // 左侧向上滑动：下一首
-            ESP_LOGI(TAG, "[Touch] Left slide up: Next track");
-            periph_bt_avrc_next(bt_periph);
-            // 显示右箭头
-            if (led_matrix_handle != nullptr) {
-                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_RIGHT_ARROW);
-            }
-            break;
-        case TouchEvent::LEFT_SLIDE_DOWN:
-            // 左侧向下滑动：上一首
-            ESP_LOGI(TAG, "[Touch] Left slide down: Previous track");
-            periph_bt_avrc_prev(bt_periph);
-            // 显示左箭头
-            if (led_matrix_handle != nullptr) {
-                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_LEFT_ARROW);
-            }
-            break;
-        case TouchEvent::RIGHT_SLIDE_UP:
-            // 右侧向上滑动：音量减小
-            ESP_LOGI(TAG, "[Touch] Right slide up: Volume down");
-            periph_bt_volume_down(bt_periph);
-            // 显示下箭头
-            if (led_matrix_handle != nullptr) {
-                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_DOWN_ARROW);
-            }
-            break;
-        case TouchEvent::RIGHT_SLIDE_DOWN:
-            // 右侧向下滑动：音量增大
-            ESP_LOGI(TAG, "[Touch] Right slide down: Volume up");
-            periph_bt_volume_up(bt_periph);
-            // 显示上箭头
-            if (led_matrix_handle != nullptr) {
-                led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_UP_ARROW);
-            }
-            break;
+    input_event_t evt = {
+        .type = EVENT_TYPE_TOUCH,
+        .data = { .touch_event = event }
+    };
+
+    if (xQueueSend(input_event_queue, &evt, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "[Touch] Event queue full, dropping touch event");
     }
 }
 
-// 获取下一个灯效模式
-static LightMode GetNextLightMode(LightMode current_mode) {
-    int mode = static_cast<int>(current_mode);
-    int next_mode = (mode + 1) % 9; // 9种模式循环: OFF, STATIC, BREATHE, RAINBOW, CHASE, MUSIC_REACTIVE, MUSIC_REACTIVE_RED, MUSIC_REACTIVE_GREEN, MUSIC_REACTIVE_BLUE
-    return static_cast<LightMode>(next_mode);
-}
-
-static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_service_event_t *evt, void *ctx)
+// 统一输入事件处理任务
+static void app_input_handle(void *pvParameters)
 {
-    if (evt->type == INPUT_KEY_SERVICE_ACTION_CLICK_RELEASE) {
-        ESP_LOGI(TAG, "[ * ] input key id is %d", (int)evt->data);
-        switch ((int)evt->data) {
-            case INPUT_KEY_USER_ID_PLAY:
-                // 切换灯效
-                if (echo_pyramid != nullptr) {
-                    LightMode current_mode = echo_pyramid->getLightMode();
-                    LightMode new_mode = GetNextLightMode(current_mode);
-                    echo_pyramid->setLightMode(new_mode);
-                    
-                    // 在5x5 LED矩阵上显示水滴效果（中间向四周发散）
-                    if (led_matrix_handle != nullptr) {
-                        led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_RIPPLE);
-                    }
-                    
-                    const char* mode_names[] = {"OFF", "MUSIC_REACTIVE", "MUSIC_REACTIVE_RED", "MUSIC_REACTIVE_GREEN", "MUSIC_REACTIVE_BLUE",
-                                                "RAINBOW", "BREATHE", "CHASE", "STATIC"};
-                    int mode_index = static_cast<int>(new_mode);
-                    if (mode_index >= 0 && mode_index < 9) {
-                        ESP_LOGI(TAG, "[ * ] [Button] Switch light mode to: %s", mode_names[mode_index]);
-                    } else {
-                        ESP_LOGI(TAG, "[ * ] [Button] Switch light mode to: mode %d", mode_index);
-                    }
-                }
-                break;
-            case INPUT_KEY_USER_ID_SET:
-                ESP_LOGI(TAG, "[ * ] [Set] pause");
-                periph_bt_pause(bt_periph);
-                break;
-#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0))
-            case INPUT_KEY_USER_ID_VOLUP:
-                ESP_LOGI(TAG, "[ * ] [long Vol+] Vol+");
-                periph_bt_volume_up(bt_periph);
-                // 显示上箭头
-                if (led_matrix_handle != nullptr) {
-                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_UP_ARROW);
-                }
-                break;
-            case INPUT_KEY_USER_ID_VOLDOWN:
-                ESP_LOGI(TAG, "[ * ] [long Vol-] Vol-");
-                periph_bt_volume_down(bt_periph);
-                // 显示下箭头
-                if (led_matrix_handle != nullptr) {
-                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_DOWN_ARROW);
-                }
-                break;
-#endif
-        }
-    } else if (evt->type == INPUT_KEY_SERVICE_ACTION_PRESS) {
-        ESP_LOGI(TAG, "[ * ] input key id is %d", (int)evt->data);
-        switch ((int)evt->data) {
-            case INPUT_KEY_USER_ID_VOLUP:
-                ESP_LOGI(TAG, "[ * ] [long Vol+] next");
-                periph_bt_avrc_next(bt_periph);
-                // 显示右箭头
-                if (led_matrix_handle != nullptr) {
-                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_RIGHT_ARROW);
-                }
-                break;
-            case INPUT_KEY_USER_ID_VOLDOWN:
-                ESP_LOGI(TAG, "[ * ] [long Vol-] Previous");
-                periph_bt_avrc_prev(bt_periph);
-                // 显示左箭头
-                if (led_matrix_handle != nullptr) {
-                    led_matrix_trigger_effect(led_matrix_handle, LED_MATRIX_EFFECT_LEFT_ARROW);
-                }
-                break;
-        }
+    input_event_t event;
 
+    ESP_LOGI(TAG, "App input handle task started");
+
+    while (1) {
+        if (xQueueReceive(input_event_queue, &event, portMAX_DELAY) == pdTRUE) {
+            switch (event.type) {
+                case EVENT_TYPE_TOUCH:
+                    if (bt_periph == NULL) {
+                        continue;
+                    }
+
+                    switch (event.data.touch_event) {
+                        case TouchEvent::LEFT_SLIDE_UP: // 左侧向上滑动：上一首
+                            ESP_LOGI(TAG, "[Touch] Left slide up: Previous track");
+                            periph_bt_avrc_prev(bt_periph);
+                            led_matrix_trigger_effect(LED_MATRIX_EFFECT_RIGHT_ARROW);
+                            break;
+                        case TouchEvent::LEFT_SLIDE_DOWN: // 左侧向下滑动：下一首
+                            ESP_LOGI(TAG, "[Touch] Left slide down: Next track");
+                            periph_bt_avrc_next(bt_periph);
+                            led_matrix_trigger_effect(LED_MATRIX_EFFECT_LEFT_ARROW);
+                            break;
+                        case TouchEvent::RIGHT_SLIDE_UP: // 右侧向上滑动：音量增大
+                            ESP_LOGI(TAG, "[Touch] Right slide up: Volume up");
+                            if (current_volume == 100) {
+                                led_matrix_trigger_effect(LED_MATRIX_EFFECT_UP_ARROW_SHAKE);
+                            } else {
+                                periph_bt_volume_up(bt_periph);
+                                current_volume = (current_volume + 10 > 100) ? 100 : (current_volume + 10);
+                                led_matrix_trigger_effect(LED_MATRIX_EFFECT_UP_ARROW);
+                            }
+                            break;
+                        case TouchEvent::RIGHT_SLIDE_DOWN: // 右侧向下滑动：音量减小
+                            ESP_LOGI(TAG, "[Touch] Right slide down: Volume down");
+                            if (current_volume == 0) {
+                                led_matrix_trigger_effect(LED_MATRIX_EFFECT_RED_X);
+                            } else {
+                                periph_bt_volume_down(bt_periph);
+                                current_volume = (current_volume - 10 < 0) ? 0 : (current_volume - 10);
+                                led_matrix_trigger_effect(LED_MATRIX_EFFECT_DOWN_ARROW);
+                            }
+                            break;
+                    }
+                    break;
+
+                case EVENT_TYPE_KEY_CLICK_RELEASE:
+                    if (event.data.key_event.key_id == INPUT_KEY_USER_ID_PLAY && echo_pyramid != nullptr) {
+                        echo_pyramid->setLightModeNext();
+
+                        led_matrix_trigger_effect(LED_MATRIX_EFFECT_RIPPLE);
+                        
+                        LightMode new_mode = echo_pyramid->getLightMode();
+                        const char* mode_names[] = {"OFF", "MUSIC_REACTIVE", "MUSIC_REACTIVE_RED", "MUSIC_REACTIVE_GREEN", "MUSIC_REACTIVE_BLUE",
+                                                    "RAINBOW", "BREATHE", "CHASE", "STATIC"};
+                        int mode_index = static_cast<int>(new_mode);
+                        if (mode_index >= 0 && mode_index < 9) {
+                            ESP_LOGI(TAG, "[ * ] [Button] Switch light mode to: %s", mode_names[mode_index]);
+                        } else {
+                            ESP_LOGI(TAG, "[ * ] [Button] Switch light mode to: mode %d", mode_index);
+                        }
+                    }
+                    break;
+
+                default:
+                    ESP_LOGW(TAG, "Unknown event type: %d", event.type);
+                    break;
+            }
+        }
     }
-    return ESP_OK;
 }
+
+
 
 extern "C" void app_main(void)
 {
@@ -208,21 +217,31 @@ extern "C" void app_main(void)
     echo_pyramid = new EchoPyramid(i2c_bus, ECHO_PYRAMID_DEVICE_ADDR);
     
     ESP_LOGI(TAG, "[ 2.2.1 ] Init 5x5 LED Matrix (GPIO 27)");
-    led_matrix_handle = led_matrix_init(27);
-    if (led_matrix_handle == nullptr) {
-        ESP_LOGW(TAG, "Failed to initialize LED matrix");
-    }
+    led_matrix_init(27);
     
     ESP_LOGI(TAG, "[ 2.3 ] Init Si5351");
     si5351 = new Si5351(i2c_bus); // before init codec chip    
     aw87559 = new Aw87559(i2c_bus);
     echo_pyramid->setLightMode(LightMode::MUSIC_REACTIVE);
     
-    ESP_LOGI(TAG, "[ 2.4 ] Setup touch callbacks");
-    echo_pyramid->addTouchEventCallback(touch_event_callback);
+    ESP_LOGI(TAG, "[ 2.4 ] Create input event queue and task");
+    input_event_queue = xQueueCreate(10, sizeof(input_event_t));
+    if (input_event_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create input event queue");
+        return;
+    }
+
+    xTaskCreate(app_input_handle, "app_input_handle", 8192, NULL, 5, &app_input_handle_task_handle);
+    if (app_input_handle_task_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to create app input handle task");
+        return;
+    }
+
+    ESP_LOGI(TAG, "[ 2.5 ] Setup touch callbacks");
+    echo_pyramid->addTouchEventCallback(touch_event_cb);
     echo_pyramid->startTouchDetection();
 
-    ESP_LOGI(TAG, "[ 2.5 ] Start codec chip");
+    ESP_LOGI(TAG, "[ 2.6 ] Start codec chip");
     audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_DECODE, AUDIO_HAL_CTRL_START);
 
     ESP_LOGI(TAG, "[ 3 ] Create audio pipeline for playback");
@@ -290,7 +309,7 @@ extern "C" void app_main(void)
     input_cfg.handle = set;
     input_ser = input_key_service_create(&input_cfg);
     input_key_service_add_key(input_ser, input_key_info, INPUT_KEY_NUM);
-    periph_service_set_callback(input_ser, input_key_service_cb, NULL);
+    periph_service_set_callback(input_ser, key_event_cb, NULL);
 #else
     ESP_LOGI(TAG, "[ 5.1 ] No physical buttons, using touch control only");
 #endif
@@ -378,10 +397,7 @@ extern "C" void app_main(void)
     esp_periph_set_destroy(set);
     
     // 清理5x5 LED矩阵
-    if (led_matrix_handle != nullptr) {
-        led_matrix_deinit(led_matrix_handle);
-        led_matrix_handle = nullptr;
-    }
+    led_matrix_deinit();
     
     esp_bluedroid_disable();
     esp_bluedroid_deinit();

@@ -52,6 +52,7 @@ public:
     // 灯效 API
     void setLightMode(LightMode mode);
     LightMode getLightMode() const;
+    void setLightModeNext();  // 切换到下一个灯效模式（循环）
     void setLightColor(uint32_t color);
     void setLightBrightness(uint8_t strip, uint8_t brightness);
     
